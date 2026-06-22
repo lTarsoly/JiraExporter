@@ -318,6 +318,47 @@ function New-IssueCsvRow {
     }
 }
 
+function Write-IssueChunk {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Collections.Generic.List[object]]$Issues,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ProjectKey,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Timestamp,
+
+        [Parameter(Mandatory = $true)]
+        [string]$OutputDirectory,
+
+        [Parameter(Mandatory = $true)]
+        [int]$ChunkNumber,
+
+        [switch]$SkipCsv
+    )
+
+    if ($Issues.Count -eq 0) {
+        return
+    }
+
+    $partSuffix = "{0:D4}" -f $ChunkNumber
+    $jsonPath = Join-Path $OutputDirectory ("jira-{0}-{1}-part{2}.json" -f $ProjectKey, $Timestamp, $partSuffix)
+    $csvPath = Join-Path $OutputDirectory ("jira-{0}-{1}-part{2}.csv" -f $ProjectKey, $Timestamp, $partSuffix)
+
+    $Issues | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath $jsonPath -Encoding utf8
+    Write-Host "Wrote JSON export chunk: $jsonPath"
+
+    if (-not $SkipCsv) {
+        $csvRows = $Issues | ForEach-Object { New-IssueCsvRow -Issue $_ }
+        $csvRows | Export-Csv -LiteralPath $csvPath -NoTypeInformation -Encoding UTF8
+        Write-Host "Wrote CSV export chunk: $csvPath"
+    }
+    else {
+        Write-Host "Skipping CSV export for chunk $partSuffix due to -SkipCsv"
+    }
+}
+
 $baseUrlCandidates = Get-JiraBaseUrlCandidates -RawBaseUrl $JiraBaseUrl
 
 # Check for PAT token: parameter -> env var (Process/User/Machine) -> null (credential prompt)
@@ -352,7 +393,11 @@ $headers["X-Atlassian-Token"] = "no-check"
 
 $searchUri = Resolve-JiraSearchUri -BaseUrls $baseUrlCandidates -Headers $headers -PageSize $PageSize
 
-$allIssues = New-Object System.Collections.Generic.List[object]
+$chunkSize = 500
+$timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
+$chunkIssues = New-Object System.Collections.Generic.List[object]
+$chunkNumber = 1
+$exportedCount = 0
 $startAt = 0
 $total = $null
 
@@ -403,10 +448,17 @@ while ($true) {
 
     $batch = @($response.issues)
     foreach ($issue in $batch) {
-        $allIssues.Add($issue)
+        $chunkIssues.Add($issue)
+        $exportedCount += 1
+
+        if ($chunkIssues.Count -ge $chunkSize) {
+            Write-IssueChunk -Issues $chunkIssues -ProjectKey $ProjectKey -Timestamp $timestamp -OutputDirectory $OutputDirectory -ChunkNumber $chunkNumber -SkipCsv:$SkipCsv
+            $chunkIssues.Clear()
+            $chunkNumber += 1
+        }
     }
 
-    Write-Host ("Fetched {0} issues (running total: {1})" -f $batch.Count, $allIssues.Count)
+    Write-Host ("Fetched {0} issues (running total: {1})" -f $batch.Count, $exportedCount)
 
     if ($batch.Count -eq 0) {
         break
@@ -418,23 +470,17 @@ while ($true) {
     }
 }
 
-$timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
-$jsonPath = Join-Path $OutputDirectory ("jira-{0}-{1}.json" -f $ProjectKey, $timestamp)
-$csvPath = Join-Path $OutputDirectory ("jira-{0}-{1}.csv" -f $ProjectKey, $timestamp)
+if ($chunkIssues.Count -gt 0) {
+    Write-IssueChunk -Issues $chunkIssues -ProjectKey $ProjectKey -Timestamp $timestamp -OutputDirectory $OutputDirectory -ChunkNumber $chunkNumber -SkipCsv:$SkipCsv
+    $chunkNumber += 1
+}
 
-$allIssues | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath $jsonPath -Encoding utf8
-Write-Host "Wrote full JSON export: $jsonPath"
-
-if (-not $SkipCsv) {
-    $csvRows = $allIssues | ForEach-Object { New-IssueCsvRow -Issue $_ }
-    $csvRows | Export-Csv -LiteralPath $csvPath -NoTypeInformation -Encoding UTF8
-    Write-Host "Wrote CSV export: $csvPath"
+if ($exportedCount -eq 0) {
+    Write-Host "Done. No issues matched the query."
 }
 else {
-    Write-Host "Skipping CSV export due to -SkipCsv"
+    Write-Host ("Done. Exported {0} issues into {1} chunk(s) of up to {2} issues each." -f $exportedCount, ($chunkNumber - 1), $chunkSize)
 }
-
-Write-Host ("Done. Exported {0} issues." -f $allIssues.Count)
 
 
 
