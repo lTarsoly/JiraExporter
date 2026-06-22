@@ -300,10 +300,16 @@ function New-IssueCsvRow {
         $issueType = $fields.issuetype.name
     }
 
+    $description = $null
+    if ($fields.PSObject.Properties.Name -contains "description" -and $null -ne $fields.description) {
+        $description = $fields.description
+    }
+
     [PSCustomObject]@{
         key         = $Issue.key
         id          = $Issue.id
         summary     = $fields.summary
+        description = $description
         issueType   = $issueType
         status      = $status
         priority    = if ($fields.priority) { $fields.priority.name } else { $null }
